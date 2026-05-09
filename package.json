@@ -1,0 +1,33 @@
+{
+  "name": "@agentdispatch/adapter-aws-agentcore",
+  "version": "0.1.0",
+  "description": "AWS Bedrock AgentCore backend adapter for AgentDispatch.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@agentdispatch/core": "^0.1.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agentcore": "^3.1045.0",
+    "@aws-sdk/client-bedrock-agentcore-control": "^3.1045.0"
+  },
+  "devDependencies": {
+    "@agentdispatch/core": "file:../agentdispatch-core",
+    "@types/node": "^22.10.2",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}
