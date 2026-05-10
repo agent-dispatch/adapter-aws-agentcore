@@ -49,6 +49,10 @@ AgentDispatch workers can return artifact metadata in either `artifacts` or `art
 
 The adapter normalizes this manifest into `ArtifactRecord` values for the configured AgentDispatch store.
 
+If a worker returns `{ "ok": false, "error": "..." }`, the adapter maps the invocation to a failed AgentDispatch task while preserving any worker-emitted events. Agent responses can be plain JSON or `text/event-stream` lines with `data: ...` JSON payloads.
+
+`command.run` requests use the AgentCore command execution event stream and set `accept: "application/vnd.amazon.eventstream"` so stdout/stderr chunks are converted into provider-neutral log events.
+
 ## Live tests
 
 Live AWS tests are opt-in only:

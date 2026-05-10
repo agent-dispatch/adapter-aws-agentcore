@@ -4,17 +4,19 @@ import { AwsAgentCoreAdapter } from "../src/index.js";
 
 class FakeDataClient {
   commands: any[] = [];
+  constructor(private readonly agentResponse: Record<string, unknown> | string = {
+    ok: true,
+    output: "done",
+    events: [{ type: "task.progress", message: "worker progress" }],
+    artifacts: [{ uri: "s3://bucket/result.json", kind: "json", contentType: "application/json", sizeBytes: 12 }]
+  }) {}
+
   async send(command: any) {
     this.commands.push(command);
     if (command.constructor.name === "InvokeAgentRuntimeCommand") {
       return {
         response: {
-          transformToString: async () => JSON.stringify({
-            ok: true,
-            output: "done",
-            events: [{ type: "task.progress", message: "worker progress" }],
-            artifacts: [{ uri: "s3://bucket/result.json", kind: "json", contentType: "application/json", sizeBytes: 12 }]
-          })
+          transformToString: async () => typeof this.agentResponse === "string" ? this.agentResponse : JSON.stringify(this.agentResponse)
         }
       };
     }
@@ -95,8 +97,47 @@ describe("AwsAgentCoreAdapter", () => {
     for await (const event of adapter.streamEvents(task.id)) events.push(event);
 
     expect(result.result).toEqual({ exitCode: 0 });
+    expect(data.commands[0].input.accept).toBe("application/vnd.amazon.eventstream");
     expect(events.map((event) => event.type)).toEqual(["session.created", "task.progress", "task.log", "task.progress"]);
     expect(events.some((event) => event.message === "hello")).toBe(true);
+  });
+
+  it("maps text/event-stream agent responses into progress and result state", async () => {
+    const data = new FakeDataClient([
+      "data: {\"ok\":true,\"output\":\"chunk one\"}",
+      "",
+      "data: {\"ok\":true,\"output\":\"done\",\"events\":[{\"type\":\"task.progress\",\"message\":\"sse progress\"}]}",
+      ""
+    ].join("\n"));
+    const adapter = createAdapter(data);
+    const request = createRequest("agent.run", "session");
+    const target = (await adapter.resolveTarget(request)).target;
+    const task = createTask(request);
+    const provisioned = await adapter.provision({ dispatch: request, task, target });
+    const result = await adapter.startTask({ dispatch: request, task, target, session: provisioned.session });
+    const events = [];
+    for await (const event of adapter.streamEvents(task.id)) events.push(event);
+
+    expect(result.result).toMatchObject({ output: "done" });
+    expect(events.some((event) => event.message === "sse progress")).toBe(true);
+  });
+
+  it("fails agent tasks when the worker returns ok false", async () => {
+    const data = new FakeDataClient({
+      ok: false,
+      error: "worker failed",
+      events: [{ type: "task.log", message: "failure details", payload: { stream: "stderr" } }]
+    });
+    const adapter = createAdapter(data);
+    const request = createRequest("agent.run", "session");
+    const target = (await adapter.resolveTarget(request)).target;
+    const task = createTask(request);
+    const provisioned = await adapter.provision({ dispatch: request, task, target });
+
+    await expect(adapter.startTask({ dispatch: request, task, target, session: provisioned.session })).rejects.toThrow("worker failed");
+    const events = [];
+    for await (const event of adapter.streamEvents(task.id)) events.push(event);
+    expect(events.some((event) => event.message === "failure details")).toBe(true);
   });
 
   it("provisions runtime mode and cleans up runtime resources", async () => {

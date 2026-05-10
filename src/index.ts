@@ -252,17 +252,23 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       accept: "application/json",
       payload: Buffer.from(payload)
     }));
-    const text = await response.response?.transformToString?.();
-    const parsed = parseJsonObject(text);
+    const text = await readResponseToString(response.response);
+    const agentResponse = parseAgentRuntimeResponse(text);
+    const parsed = agentResponse.parsed;
     const workerEvents = normalizeWorkerEvents(request.task.id, parsed);
     if (workerEvents.length > 0) {
       for (const event of workerEvents) this.pushEvent(event);
-    } else if (text) {
-      this.push(request.task.id, "task.progress", text);
+    } else if (agentResponse.data.length > 0) {
+      for (const chunk of agentResponse.data) this.push(request.task.id, "task.progress", chunk);
+    } else if (agentResponse.text) {
+      this.push(request.task.id, "task.progress", agentResponse.text);
+    }
+    if (parsed?.ok === false) {
+      throw new Error(typeof parsed.error === "string" ? parsed.error : "AgentCore worker returned ok:false.");
     }
     return {
       providerRefs: { runtimeSessionId: session.runtimeSessionId },
-      result: parsed ?? { response: text ?? "" },
+      result: parsed ?? { response: agentResponse.data.length > 0 ? agentResponse.data.join("\n") : agentResponse.text ?? "" },
       artifacts: normalizeArtifactManifest(request.task.id, parsed)
     };
   }
@@ -275,7 +281,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       runtimeSessionId: session.runtimeSessionId,
       qualifier: session.qualifier,
       contentType: "application/json",
-      accept: "application/json",
+      accept: "application/vnd.amazon.eventstream",
       body: { command, timeout: typeof request.dispatch.input.timeoutSeconds === "number" ? request.dispatch.input.timeoutSeconds : undefined }
     }));
     let exitCode = 0;
@@ -336,10 +342,45 @@ function runtimeArnToId(runtimeArn: string): string {
   return runtimeArn.split("/").at(-1) ?? runtimeArn;
 }
 
+async function readResponseToString(response: any): Promise<string | undefined> {
+  if (!response) return undefined;
+  if (typeof response === "string") return response;
+  if (response instanceof Uint8Array) return Buffer.from(response).toString("utf8");
+  if (typeof response.transformToString === "function") return response.transformToString();
+  if (typeof response[Symbol.asyncIterator] === "function") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of response) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  }
+  return undefined;
+}
+
+function parseAgentRuntimeResponse(text: string | undefined): { text?: string; data: string[]; parsed?: Record<string, unknown> } {
+  const data = extractSseData(text);
+  let parsed = parseJsonObject(text);
+  for (const chunk of data) {
+    const chunkJson = parseJsonObject(chunk);
+    if (chunkJson) parsed = chunkJson;
+  }
+  return { text, data, parsed };
+}
+
+function extractSseData(text: string | undefined): string[] {
+  if (!text) return [];
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice("data:".length).trim())
+    .filter((line) => line.length > 0 && line !== "[DONE]");
+}
+
 function parseJsonObject(text: string | undefined): Record<string, unknown> | undefined {
   if (!text) return undefined;
   try {
-    const parsed = JSON.parse(text);
+    const parsed = JSON.parse(text.trim());
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
   } catch {
     return undefined;
