@@ -1,0 +1,66 @@
+name: Live AWS AgentCore
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_runtime_mode:
+        description: "Also run runtime-mode provisioning/cleanup test"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  live-agentcore:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: adapter-aws-agentcore
+    env:
+      AGENTDISPATCH_LIVE_AGENTCORE: "1"
+      AGENTDISPATCH_LIVE_AGENTCORE_RUNTIME_MODE: ${{ inputs.run_runtime_mode }}
+      AGENTDISPATCH_AWS_REGION: ${{ secrets.AGENTDISPATCH_AWS_REGION }}
+      AGENTDISPATCH_AGENTCORE_RUNTIME_ARN: ${{ secrets.AGENTDISPATCH_AGENTCORE_RUNTIME_ARN }}
+      AGENTDISPATCH_AGENTCORE_RUNTIME_ECR_IMAGE_URI: ${{ secrets.AGENTDISPATCH_AGENTCORE_RUNTIME_ECR_IMAGE_URI }}
+      AGENTDISPATCH_AGENTCORE_EXECUTION_ROLE_ARN: ${{ secrets.AGENTDISPATCH_AGENTCORE_EXECUTION_ROLE_ARN }}
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: agent-dispatch/adapter-aws-agentcore
+          path: adapter-aws-agentcore
+      - uses: actions/checkout@v4
+        with:
+          repository: agent-dispatch/core
+          path: agentdispatch-core
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: adapter-aws-agentcore/package-lock.json
+      - name: Configure AWS credentials from OIDC
+        if: ${{ env.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AGENTDISPATCH_AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+      - name: Validate required live-test secrets
+        run: |
+          test -n "$AGENTDISPATCH_AWS_REGION"
+          test -n "$AGENTDISPATCH_AGENTCORE_RUNTIME_ARN"
+          if [ "$AGENTDISPATCH_LIVE_AGENTCORE_RUNTIME_MODE" = "true" ]; then
+            test -n "$AGENTDISPATCH_AGENTCORE_RUNTIME_ECR_IMAGE_URI"
+            test -n "$AGENTDISPATCH_AGENTCORE_EXECUTION_ROLE_ARN"
+          fi
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test -- --run test/live.test.ts

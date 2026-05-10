@@ -43,3 +43,5 @@ AGENTDISPATCH_AWS_REGION=us-west-2 \
 AGENTDISPATCH_AGENTCORE_RUNTIME_ARN=arn:aws:bedrock-agentcore:... \
 npm test
 ```
+
+For the manual GitHub Actions workflow, required secrets, IAM permissions, and optional runtime-mode validation, see `docs/live-agentcore.md`.
