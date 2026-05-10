@@ -243,7 +243,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
   }
 
   private async startAgentTask(request: StartTaskRequest, session: { runtimeSessionId: string; runtimeArn: string; qualifier?: string }): Promise<StartTaskResult> {
-    const payload = JSON.stringify({ taskType: request.dispatch.taskType, input: request.dispatch.input, metadata: request.dispatch.metadata });
+    const payload = JSON.stringify(createAgentRuntimePayload(request.dispatch));
     const response: any = await this.clients.data.send(new InvokeAgentRuntimeCommand({
       agentRuntimeArn: session.runtimeArn,
       runtimeSessionId: session.runtimeSessionId,
@@ -344,6 +344,21 @@ function parseJsonObject(text: string | undefined): Record<string, unknown> | un
   } catch {
     return undefined;
   }
+}
+
+function createAgentRuntimePayload(request: DispatchRequest): Record<string, unknown> {
+  const prompt = typeof request.input.prompt === "string"
+    ? request.input.prompt
+    : typeof request.input.instruction === "string"
+      ? request.input.instruction
+      : undefined;
+  return {
+    taskType: request.taskType,
+    input: request.input,
+    metadata: request.metadata,
+    ...(prompt ? { prompt } : {}),
+    ...(request.input.context ? { context: request.input.context } : {})
+  };
 }
 
 function normalizeWorkerEvents(taskId: string, parsed: Record<string, unknown> | undefined): RuntimeEvent[] {

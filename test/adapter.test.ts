@@ -73,6 +73,11 @@ describe("AwsAgentCoreAdapter", () => {
     for await (const event of adapter.streamEvents(task.id)) events.push(event);
 
     expect(data.commands.map((command) => command.constructor.name)).toContain("InvokeAgentRuntimeCommand");
+    expect(JSON.parse(Buffer.from(data.commands[0].input.payload).toString("utf8"))).toMatchObject({
+      taskType: "agent.run",
+      input: { instruction: "run" },
+      prompt: "run"
+    });
     expect(result.result).toMatchObject({ ok: true, output: "done" });
     expect(result.artifacts?.[0]).toMatchObject({ taskId: task.id, uri: "s3://bucket/result.json", kind: "json" });
     expect(events.some((event) => event.message === "worker progress")).toBe(true);
