@@ -17,6 +17,7 @@ import {
   nowIso,
   toRuntimeError,
   type AccountProfile,
+  type ArtifactRecord,
   type AdapterCapability,
   type BackendAdapter,
   type CancelResult,
@@ -252,10 +253,18 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       payload: Buffer.from(payload)
     }));
     const text = await response.response?.transformToString?.();
-    if (text) {
+    const parsed = parseJsonObject(text);
+    const workerEvents = normalizeWorkerEvents(request.task.id, parsed);
+    if (workerEvents.length > 0) {
+      for (const event of workerEvents) this.pushEvent(event);
+    } else if (text) {
       this.push(request.task.id, "task.progress", text);
     }
-    return { providerRefs: { runtimeSessionId: session.runtimeSessionId }, result: parseJsonObject(text) ?? { response: text ?? "" } };
+    return {
+      providerRefs: { runtimeSessionId: session.runtimeSessionId },
+      result: parsed ?? { response: text ?? "" },
+      artifacts: normalizeArtifactManifest(request.task.id, parsed)
+    };
   }
 
   private async startCommandTask(request: StartTaskRequest, session: { runtimeSessionId: string; runtimeArn: string; qualifier?: string }): Promise<StartTaskResult> {
@@ -304,9 +313,13 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
   }
 
   private push(taskId: string, type: RuntimeEvent["type"], message?: string, payload?: Record<string, unknown>): void {
-    const current = this.events.get(taskId) ?? [];
-    current.push({ taskId, type, message, payload, timestamp: nowIso() });
-    this.events.set(taskId, current);
+    this.pushEvent({ taskId, type, message, payload, timestamp: nowIso() });
+  }
+
+  private pushEvent(event: RuntimeEvent): void {
+    const current = this.events.get(event.taskId) ?? [];
+    current.push(event);
+    this.events.set(event.taskId, current);
   }
 }
 
@@ -331,4 +344,45 @@ function parseJsonObject(text: string | undefined): Record<string, unknown> | un
   } catch {
     return undefined;
   }
+}
+
+function normalizeWorkerEvents(taskId: string, parsed: Record<string, unknown> | undefined): RuntimeEvent[] {
+  const events = Array.isArray(parsed?.events) ? parsed.events : [];
+  return events.flatMap((event) => {
+    if (!event || typeof event !== "object") return [];
+    const record = event as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type as RuntimeEvent["type"] : undefined;
+    if (!type) return [];
+    const message = typeof record.message === "string" ? record.message : undefined;
+    const payload = record.payload && typeof record.payload === "object" && !Array.isArray(record.payload)
+      ? record.payload as Record<string, unknown>
+      : undefined;
+    return [{ taskId, type, message, payload, timestamp: nowIso() }];
+  });
+}
+
+function normalizeArtifactManifest(taskId: string, parsed: Record<string, unknown> | undefined): ArtifactRecord[] {
+  const artifacts = Array.isArray(parsed?.artifacts)
+    ? parsed.artifacts
+    : Array.isArray(parsed?.artifact_manifest)
+      ? parsed.artifact_manifest
+      : [];
+  return artifacts.flatMap((artifact) => {
+    if (!artifact || typeof artifact !== "object") return [];
+    const record = artifact as Record<string, unknown>;
+    const uri = typeof record.uri === "string" ? record.uri : typeof record.path === "string" ? record.path : undefined;
+    if (!uri) return [];
+    return [{
+      id: typeof record.id === "string" ? record.id : createId("art"),
+      taskId,
+      kind: typeof record.kind === "string" ? record.kind : "file",
+      uri,
+      contentType: typeof record.contentType === "string" ? record.contentType : typeof record.content_type === "string" ? record.content_type : undefined,
+      sizeBytes: typeof record.sizeBytes === "number" ? record.sizeBytes : typeof record.size_bytes === "number" ? record.size_bytes : undefined,
+      providerRefs: record.providerRefs && typeof record.providerRefs === "object" && !Array.isArray(record.providerRefs)
+        ? record.providerRefs as Record<string, unknown>
+        : undefined,
+      createdAt: typeof record.createdAt === "string" ? record.createdAt : nowIso()
+    }];
+  });
 }
