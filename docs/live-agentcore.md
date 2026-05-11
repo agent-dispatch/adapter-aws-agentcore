@@ -25,6 +25,7 @@ Runtime mode additionally requires:
 
 - `bedrock-agentcore-control:CreateAgentRuntime`
 - `bedrock-agentcore-control:CreateAgentRuntimeEndpoint`
+- `bedrock-agentcore-control:GetAgentRuntime`
 - `bedrock-agentcore-control:GetAgentRuntimeEndpoint`
 - `bedrock-agentcore-control:DeleteAgentRuntimeEndpoint`
 - `bedrock-agentcore-control:DeleteAgentRuntime`
