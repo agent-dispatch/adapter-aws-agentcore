@@ -32,7 +32,7 @@ import {
   type SessionRecord,
   type StartTaskRequest,
   type StartTaskResult
-} from "@agentdispatch/core";
+} from "@agent-dispatch/core";
 
 export interface AwsAgentCoreAdapterConfig {
   account: AccountProfile;

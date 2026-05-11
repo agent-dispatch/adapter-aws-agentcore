@@ -13,13 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Bootstrap check
-        run: |
-          if grep -q "file:../" package.json; then
-            echo "Skipping npm install until cross-repo packages are published."
-            exit 0
-          fi
-          npm install
-          npm run typecheck
-          npm test --if-present
-          npm run build
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test --if-present
+      - run: npm run build

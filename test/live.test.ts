@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nowIso, type DispatchRequest, type RuntimeTarget, type TaskRecord } from "@agentdispatch/core";
+import { nowIso, type DispatchRequest, type RuntimeTarget, type TaskRecord } from "@agent-dispatch/core";
 import { AwsAgentCoreAdapter } from "../src/index.js";
 
 describe("live AWS AgentCore integration", () => {

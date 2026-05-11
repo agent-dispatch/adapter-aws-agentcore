@@ -1,5 +1,5 @@
 {
-  "name": "@agentdispatch/adapter-aws-agentcore",
+  "name": "@agent-dispatch/adapter-aws-agentcore",
   "version": "0.1.0",
   "description": "AWS Bedrock AgentCore backend adapter for AgentDispatch.",
   "type": "module",
@@ -10,24 +10,39 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@agentdispatch/core": "^0.1.0"
+    "@agent-dispatch/core": "^0.1.0"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-agentcore": "^3.1045.0",
     "@aws-sdk/client-bedrock-agentcore-control": "^3.1045.0"
   },
   "devDependencies": {
-    "@agentdispatch/core": "file:../agentdispatch-core",
+    "@agent-dispatch/core": "^0.1.0",
     "@types/node": "^22.10.2",
     "tsup": "^8.3.5",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agent-dispatch/adapter-aws-agentcore.git"
+  },
+  "bugs": {
+    "url": "https://github.com/agent-dispatch/adapter-aws-agentcore/issues"
+  },
+  "homepage": "https://github.com/agent-dispatch/adapter-aws-agentcore#readme",
+  "publishConfig": {
+    "access": "public"
   }
 }

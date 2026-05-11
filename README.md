@@ -1,4 +1,4 @@
-# @agentdispatch/adapter-aws-agentcore
+# @agent-dispatch/adapter-aws-agentcore
 
 AWS Bedrock AgentCore adapter for AgentDispatch.
 
