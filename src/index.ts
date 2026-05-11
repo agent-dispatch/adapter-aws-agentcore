@@ -10,8 +10,10 @@ import {
   CreateAgentRuntimeEndpointCommand,
   DeleteAgentRuntimeCommand,
   DeleteAgentRuntimeEndpointCommand,
+  GetAgentRuntimeCommand,
   GetAgentRuntimeEndpointCommand
 } from "@aws-sdk/client-bedrock-agentcore-control";
+import { createHash } from "node:crypto";
 import {
   createId,
   nowIso,
@@ -190,21 +192,26 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       throw new Error("runtime mode requires target.details.ecrImageUri and target.details.executionRoleArn or defaultExecutionRoleArn.");
     }
 
-    const runtimeName = `${this.config.runtimeNamePrefix ?? "agentdispatch"}-${request.task.id}`.slice(0, 48);
+    const runtimeName = createAgentCoreResourceName(this.config.runtimeNamePrefix ?? "agentdispatch", request.task.id);
     const runtimeResponse: any = await this.clients.control.send(new CreateAgentRuntimeCommand({
       agentRuntimeName: runtimeName,
       agentRuntimeArtifact: { containerConfiguration: { containerUri: ecrImageUri } },
       roleArn: executionRoleArn,
       networkConfiguration: { networkMode: "PUBLIC" },
-      protocolConfiguration: { serverProtocol: "HTTP" }
+      protocolConfiguration: { serverProtocol: "HTTP" },
+      clientToken: createAgentCoreClientToken("runtime", request.task.id)
     } as any));
 
-    const runtimeArn = runtimeResponse.agentRuntimeArn;
+    const runtimeArn = requiredString(runtimeResponse.agentRuntimeArn, "CreateAgentRuntime did not return agentRuntimeArn.");
     const agentRuntimeId = runtimeResponse.agentRuntimeId ?? runtimeArnToId(runtimeArn);
-    const endpointName = `endpoint-${request.task.id}`.slice(0, 48);
+    const agentRuntimeVersion = runtimeResponse.agentRuntimeVersion;
+    await this.waitForRuntime(agentRuntimeId);
+    const endpointName = createAgentCoreResourceName("endpoint", request.task.id);
     const endpointResponse: any = await this.clients.control.send(new CreateAgentRuntimeEndpointCommand({
       agentRuntimeId,
-      endpointName
+      name: endpointName,
+      agentRuntimeVersion,
+      clientToken: createAgentCoreClientToken("endpoint", request.task.id)
     } as any));
     await this.waitForEndpoint(agentRuntimeId, endpointName);
 
@@ -218,7 +225,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       capability: request.dispatch.capability,
       backend: this.name,
       status: "ready",
-      providerRefs: { runtimeArn, agentRuntimeId, endpointName, endpointArn: endpointResponse.agentRuntimeEndpointArn },
+      providerRefs: { runtimeArn, agentRuntimeId, agentRuntimeVersion, endpointName, endpointArn: endpointResponse.agentRuntimeEndpointArn },
       cleanupStatus: "pending",
       createdAt: timestamp,
       updatedAt: timestamp
@@ -231,12 +238,12 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       capability: request.dispatch.capability,
       backend: this.name,
       status: "ready",
-      providerRefs: { runtimeSessionId, runtimeArn, agentRuntimeId, endpointName },
+      providerRefs: { runtimeSessionId, runtimeArn, agentRuntimeId, endpointName, qualifier: endpointName },
       createdAt: timestamp,
       updatedAt: timestamp
     };
     request.target.providerRefs = { ...request.target.providerRefs, ...runtime.providerRefs };
-    this.sessions.set(request.task.id, { runtimeSessionId, runtimeArn, qualifier: this.config.qualifier, target: request.target });
+    this.sessions.set(request.task.id, { runtimeSessionId, runtimeArn, qualifier: endpointName, target: request.target });
     this.push(request.task.id, "runtime.provisioned", "Provisioned AgentCore runtime.", runtime.providerRefs);
     this.push(request.task.id, "session.created", "Created AgentCore runtime session.", session.providerRefs);
     return { runtime, session, providerRefs: { ...runtime.providerRefs, ...session.providerRefs } };
@@ -286,12 +293,17 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     }));
     let exitCode = 0;
     for await (const item of response.stream ?? []) {
+      const streamError = commandStreamError(item);
+      if (streamError) {
+        this.push(request.task.id, "task.failed", streamError.message, { error: streamError });
+        throw new Error(streamError.message);
+      }
       const chunk = item.chunk;
       if (chunk?.contentStart) this.push(request.task.id, "task.progress", "Command started.");
       if (chunk?.contentDelta?.stdout) this.push(request.task.id, "task.log", chunk.contentDelta.stdout, { stream: "stdout" });
       if (chunk?.contentDelta?.stderr) this.push(request.task.id, "task.log", chunk.contentDelta.stderr, { stream: "stderr" });
       if (chunk?.contentStop) {
-        exitCode = chunk.contentStop.exitCode;
+        exitCode = chunk.contentStop.exitCode ?? -1;
         this.push(request.task.id, exitCode === 0 ? "task.progress" : "task.failed", `Command ${chunk.contentStop.status}.`, { exitCode });
       }
     }
@@ -318,6 +330,16 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     throw new Error(`Timed out waiting for AgentCore endpoint ${endpointName}.`);
   }
 
+  private async waitForRuntime(agentRuntimeId: string): Promise<void> {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const runtime: any = await this.clients.control.send(new GetAgentRuntimeCommand({ agentRuntimeId }));
+      if (runtime.status === "READY") return;
+      if (runtime.status === "CREATE_FAILED") throw new Error(`AgentCore runtime ${agentRuntimeId} failed to create.`);
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+    throw new Error(`Timed out waiting for AgentCore runtime ${agentRuntimeId}.`);
+  }
+
   private push(taskId: string, type: RuntimeEvent["type"], message?: string, payload?: Record<string, unknown>): void {
     this.pushEvent({ taskId, type, message, payload, timestamp: nowIso() });
   }
@@ -338,8 +360,50 @@ function stringDetail(details: Record<string, unknown>, key: string): string | u
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function requiredString(value: unknown, message: string): string {
+  if (typeof value === "string" && value.length > 0) return value;
+  throw new Error(message);
+}
+
 function runtimeArnToId(runtimeArn: string): string {
-  return runtimeArn.split("/").at(-1) ?? runtimeArn;
+  return runtimeArn.split("/").at(-1)?.split(":")[0] ?? runtimeArn;
+}
+
+function createAgentCoreResourceName(prefix: string, taskId: string): string {
+  const safePrefix = sanitizeAgentCoreName(prefix || "agentdispatch");
+  const safeTask = sanitizeAgentCoreName(taskId).slice(-24);
+  const maxPrefixLength = Math.max(1, 47 - safeTask.length);
+  return sanitizeAgentCoreName(`${safePrefix.slice(0, maxPrefixLength)}_${safeTask}`).slice(0, 48);
+}
+
+function sanitizeAgentCoreName(value: string): string {
+  const normalized = value.replace(/[^a-zA-Z0-9_]/g, "_").replace(/_+/g, "_");
+  return /^[a-zA-Z]/.test(normalized) ? normalized : `a${normalized}`;
+}
+
+function createAgentCoreClientToken(...parts: string[]): string {
+  return `ad${createHash("sha256").update(parts.join(":")).digest("hex")}`;
+}
+
+function commandStreamError(item: any): { code: string; message: string } | undefined {
+  for (const key of [
+    "accessDeniedException",
+    "internalServerException",
+    "resourceNotFoundException",
+    "serviceQuotaExceededException",
+    "throttlingException",
+    "validationException",
+    "runtimeClientError"
+  ]) {
+    const error = item?.[key];
+    if (error) {
+      return {
+        code: key,
+        message: typeof error.message === "string" ? error.message : `AgentCore command stream failed with ${key}.`
+      };
+    }
+  }
+  return undefined;
 }
 
 async function readResponseToString(response: any): Promise<string | undefined> {

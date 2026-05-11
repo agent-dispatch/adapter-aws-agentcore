@@ -60,7 +60,7 @@ Live AWS tests are opt-in only:
 ```bash
 AGENTDISPATCH_LIVE_AGENTCORE=1 \
 AGENTDISPATCH_AWS_REGION=us-west-2 \
-AGENTDISPATCH_AGENTCORE_RUNTIME_ARN=arn:aws:bedrock-agentcore:... \
+AGENTDISPATCH_AGENTCORE_RUNTIME_ARN=arn:aws:bedrock-agentcore:us-west-2:123456789012:agent/... \
 npm test
 ```
 

@@ -1,6 +1,6 @@
 {
   "name": "@agent-dispatch/adapter-aws-agentcore",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AWS Bedrock AgentCore backend adapter for AgentDispatch.",
   "type": "module",
   "license": "Apache-2.0",
