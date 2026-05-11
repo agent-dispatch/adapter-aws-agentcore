@@ -199,10 +199,34 @@ describe("AwsAgentCoreAdapter", () => {
     const request = createRequest("agent.run", "session");
     const target = (await adapter.resolveTarget(request)).target;
     const task = createTask(request);
-    await adapter.provision({ dispatch: request, task, target });
+    const provisioned = await adapter.provision({ dispatch: request, task, target });
 
     await expect(adapter.cancel(task.id)).resolves.toMatchObject({ status: "cancelled" });
     expect(data.commands.map((command) => command.constructor.name)).toContain("StopRuntimeSessionCommand");
+    expect(data.commands.find((command) => command.constructor.name === "StopRuntimeSessionCommand").input.runtimeSessionId)
+      .toBe(provisioned.session?.providerRefs.runtimeSessionId);
+  });
+
+  it("can cancel a session-mode task after adapter restart", async () => {
+    const firstData = new FakeDataClient();
+    const firstAdapter = createAdapter(firstData);
+    const request = createRequest("agent.run", "session");
+    const target = (await firstAdapter.resolveTarget(request)).target;
+    const task = createTask(request);
+    const provisioned = await firstAdapter.provision({ dispatch: request, task, target });
+
+    const restartedData = new FakeDataClient();
+    const restartedAdapter = createAdapter(restartedData);
+    await expect(restartedAdapter.cancel(task.id)).resolves.toMatchObject({
+      status: "cancelled",
+      providerRefs: { runtimeSessionId: provisioned.session?.providerRefs.runtimeSessionId }
+    });
+
+    const stop = restartedData.commands.find((command) => command.constructor.name === "StopRuntimeSessionCommand");
+    expect(stop.input).toMatchObject({
+      agentRuntimeArn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:agent/00000000-0000-0000-0000-000000000000:1",
+      runtimeSessionId: provisioned.session?.providerRefs.runtimeSessionId
+    });
   });
 });
 
