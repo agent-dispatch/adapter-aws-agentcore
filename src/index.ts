@@ -105,7 +105,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     }
 
     const runtimeArn = this.requiredRuntimeArn();
-    const runtimeSessionId = createAgentCoreSessionId();
+    const runtimeSessionId = createAgentCoreSessionId(request.task.id);
     const timestamp = nowIso();
     const session: SessionRecord = {
       id: createId("session"),
@@ -149,7 +149,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
   }
 
   async cancel(taskId: string): Promise<CancelResult> {
-    const session = this.sessions.get(taskId);
+    const session = this.sessions.get(taskId) ?? this.fallbackSession(taskId);
     if (!session) {
       return { status: "not_found" };
     }
@@ -215,7 +215,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     } as any));
     await this.waitForEndpoint(agentRuntimeId, endpointName);
 
-    const runtimeSessionId = createAgentCoreSessionId();
+    const runtimeSessionId = createAgentCoreSessionId(request.task.id);
     const timestamp = nowIso();
     const runtime: RuntimeRecord = {
       id: createId("runtime"),
@@ -320,6 +320,15 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     return this.config.runtimeArn;
   }
 
+  private fallbackSession(taskId: string): { runtimeSessionId: string; runtimeArn: string; qualifier?: string; target?: RuntimeTarget } | undefined {
+    if (!this.config.runtimeArn) return undefined;
+    return {
+      runtimeSessionId: createAgentCoreSessionId(taskId),
+      runtimeArn: this.config.runtimeArn,
+      qualifier: this.config.qualifier
+    };
+  }
+
   private async waitForEndpoint(agentRuntimeId: string, endpointName: string): Promise<void> {
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const endpoint: any = await this.clients.control.send(new GetAgentRuntimeEndpointCommand({ agentRuntimeId, endpointName }));
@@ -351,8 +360,8 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
   }
 }
 
-function createAgentCoreSessionId(): string {
-  return createId("agentcore_session");
+function createAgentCoreSessionId(taskId: string): string {
+  return `ad-${createHash("sha256").update(taskId).digest("hex").slice(0, 32)}`;
 }
 
 function stringDetail(details: Record<string, unknown>, key: string): string | undefined {
