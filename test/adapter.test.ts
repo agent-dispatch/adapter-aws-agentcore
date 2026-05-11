@@ -88,6 +88,65 @@ describe("AwsAgentCoreAdapter", () => {
     expect(events.some((event) => event.message === "worker progress")).toBe(true);
   });
 
+  it("prepares A2A AgentCore connection details for lead agents", async () => {
+    const adapter = createAdapter();
+    const request = createRequest("agent.run", "session", { instruction: "delegate", model: "claude-sonnet" }, undefined, "a2a");
+    const task = createTask(request);
+    const prepared = await adapter.prepareTask({ dispatch: request, task });
+    const provisioned = await adapter.provision({
+      dispatch: request,
+      task,
+      target: (await adapter.resolveTarget(request)).target
+    });
+
+    expect(prepared.cloudAgent).toMatchObject({
+      protocol: "a2a",
+      provider: "aws",
+      backend: "aws-agentcore",
+      accountProfile: "dev-aws",
+      sessionId: expect.stringMatching(/^ad-[a-f0-9]{32}$/),
+      invocation: {
+        type: "aws.agentcore.invoke_agent_runtime",
+        agentRuntimeArn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:agent/00000000-0000-0000-0000-000000000000:1",
+        runtimeUrl: "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-west-2%3A123456789012%3Aagent%2F00000000-0000-0000-0000-000000000000%3A1/invocations/",
+        sessionHeaderName: "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id",
+        payloadFormat: "a2a.jsonrpc.message-send"
+      },
+      a2a: {
+        transport: "json-rpc-2.0-http",
+        messageMethod: "message/send",
+        agentCardOperation: "GetAgentCard",
+        endpointUrl: "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-west-2%3A123456789012%3Aagent%2F00000000-0000-0000-0000-000000000000%3A1/invocations/",
+        agentCardUrl: "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-west-2%3A123456789012%3Aagent%2F00000000-0000-0000-0000-000000000000%3A1/invocations/.well-known/agent-card.json"
+      }
+    });
+    expect(provisioned.session?.providerRefs.runtimeSessionId).toBe(prepared.cloudAgent?.sessionId);
+  });
+
+  it("sends A2A message/send payloads when target protocol is a2a", async () => {
+    const data = new FakeDataClient();
+    const adapter = createAdapter(data);
+    const request = createRequest("agent.run", "session", { instruction: "research this" }, undefined, "a2a");
+    const target = (await adapter.resolveTarget(request)).target;
+    const task = createTask(request);
+    const provisioned = await adapter.provision({ dispatch: request, task, target });
+    await adapter.startTask({ dispatch: request, task, target, session: provisioned.session });
+    const payload = JSON.parse(Buffer.from(data.commands[0].input.payload).toString("utf8"));
+
+    expect(payload).toMatchObject({
+      jsonrpc: "2.0",
+      id: task.id,
+      method: "message/send",
+      params: {
+        message: {
+          role: "user",
+          parts: [{ kind: "text", text: "research this" }],
+          messageId: task.id
+        }
+      }
+    });
+  });
+
   it("runs command tasks and maps command stream chunks to events", async () => {
     const data = new FakeDataClient();
     const adapter = createAdapter(data);
@@ -147,7 +206,7 @@ describe("AwsAgentCoreAdapter", () => {
     const control = new FakeControlClient();
     const data = new FakeDataClient();
     const adapter = createAdapter(data, control);
-    const request = createRequest("agent.run", "runtime", {}, { ecrImageUri: "123.dkr.ecr.us-west-2.amazonaws.com/worker:latest", executionRoleArn: "arn:aws:iam::123:role/exec" });
+    const request = createRequest("agent.run", "runtime", {}, { ecrImageUri: "123.dkr.ecr.us-west-2.amazonaws.com/worker:latest", executionRoleArn: "arn:aws:iam::123:role/exec", cleanupAfterTask: true }, "a2a");
     const target = (await adapter.resolveTarget(request)).target;
     const task = createTask(request);
     const provisioned = await adapter.provision({ dispatch: request, task, target });
@@ -170,6 +229,25 @@ describe("AwsAgentCoreAdapter", () => {
       name: expect.stringMatching(/^[a-zA-Z][a-zA-Z0-9_]{0,47}$/),
       agentRuntimeVersion: "1"
     });
+    expect(control.commands.find((command) => command.constructor.name === "CreateAgentRuntimeCommand").input.protocolConfiguration).toEqual({
+      serverProtocol: "A2A"
+    });
+  });
+
+  it("keeps A2A runtime-mode resources alive for follow-up by default", async () => {
+    const control = new FakeControlClient();
+    const adapter = createAdapter(new FakeDataClient(), control);
+    const request = createRequest("agent.run", "runtime", {}, { ecrImageUri: "123.dkr.ecr.us-west-2.amazonaws.com/worker:latest", executionRoleArn: "arn:aws:iam::123:role/exec" }, "a2a");
+    const target = (await adapter.resolveTarget(request)).target;
+    const task = createTask(request);
+    await adapter.provision({ dispatch: request, task, target });
+    const cleanup = await adapter.cleanup(target);
+
+    expect(cleanup).toMatchObject({
+      status: "skipped",
+      providerRefs: { cleanupReason: "a2a_session_available_for_followup" }
+    });
+    expect(control.commands.map((command) => command.constructor.name)).not.toContain("DeleteAgentRuntimeCommand");
   });
 
   it("fails command tasks when AgentCore emits a stream exception", async () => {
@@ -238,13 +316,13 @@ function createAdapter(data = new FakeDataClient(), control = new FakeControlCli
   }, { data: data as any, control: control as any });
 }
 
-function createRequest(taskType: DispatchRequest["taskType"], mode: RuntimeTarget["mode"], input: Record<string, unknown> = { instruction: "run" }, details?: Record<string, unknown>): DispatchRequest {
+function createRequest(taskType: DispatchRequest["taskType"], mode: RuntimeTarget["mode"], input: Record<string, unknown> = { instruction: "run" }, details?: Record<string, unknown>, protocol?: DispatchRequest["target"]["protocol"]): DispatchRequest {
   return {
     provider: "aws",
     accountProfile: "dev-aws",
     capability: "agent-runtime",
     taskType,
-    target: { mode, details },
+    target: { mode, protocol, details },
     input
   };
 }

@@ -13,7 +13,8 @@ describe("AwsAgentCoreAdapter", () => {
       provider: "aws",
       capability: "agent-runtime",
       taskTypes: ["agent.run", "command.run"],
-      targetModes: ["session", "runtime"]
+      targetModes: ["session", "runtime"],
+      protocols: ["http", "a2a", "mcp", "ag-ui"]
     });
   });
 });

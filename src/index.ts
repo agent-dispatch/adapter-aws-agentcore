@@ -23,13 +23,17 @@ import {
   type AdapterCapability,
   type BackendAdapter,
   type CancelResult,
+  type CloudAgentInteraction,
   type CleanupResult,
   type DispatchRequest,
+  type PrepareTaskRequest,
+  type PrepareTaskResult,
   type ProvisionRequest,
   type ProvisionResult,
   type ResolvedTarget,
   type RuntimeEvent,
   type RuntimeRecord,
+  type RuntimeProtocol,
   type RuntimeTarget,
   type SessionRecord,
   type StartTaskRequest,
@@ -41,6 +45,7 @@ export interface AwsAgentCoreAdapterConfig {
   region: string;
   runtimeArn?: string;
   qualifier?: string;
+  protocol?: RuntimeProtocol;
   runtimeNamePrefix?: string;
   defaultExecutionRoleArn?: string;
   deleteRuntimeOnCompletion?: boolean;
@@ -51,13 +56,24 @@ interface AwsAgentCoreClients {
   control: BedrockAgentCoreControlClient;
 }
 
+type AgentCoreServerProtocol = "HTTP" | "MCP" | "A2A" | "AGUI";
+
+interface AwsAgentCoreSession {
+  runtimeSessionId: string;
+  runtimeArn: string;
+  qualifier?: string;
+  protocol: RuntimeProtocol;
+  serverProtocol: AgentCoreServerProtocol;
+  target?: RuntimeTarget;
+}
+
 export class AwsAgentCoreAdapter implements BackendAdapter {
   readonly name = "aws-agentcore";
   readonly provider = "aws";
   private readonly config: AwsAgentCoreAdapterConfig;
   private readonly clients: AwsAgentCoreClients;
   private readonly events = new Map<string, RuntimeEvent[]>();
-  private readonly sessions = new Map<string, { runtimeSessionId: string; runtimeArn: string; qualifier?: string; target?: RuntimeTarget }>();
+  private readonly sessions = new Map<string, AwsAgentCoreSession>();
 
   constructor(config: AwsAgentCoreAdapterConfig, clients?: Partial<AwsAgentCoreClients>) {
     this.config = config;
@@ -74,13 +90,40 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
         capability: "agent-runtime",
         taskTypes: ["agent.run", "command.run"],
         targetModes: ["session", "runtime"],
+        protocols: ["http", "a2a", "mcp", "ag-ui"],
         configRequirements: ["region", "runtimeArn for session mode", "ecrImageUri and executionRoleArn for runtime mode"]
       }
     ];
   }
 
+  async prepareTask(request: PrepareTaskRequest): Promise<PrepareTaskResult> {
+    const protocol = this.runtimeProtocol(request.dispatch);
+    const serverProtocol = toAgentCoreServerProtocol(protocol);
+    if (request.dispatch.target.mode !== "session") {
+      return {
+        providerRefs: { region: this.config.region, protocol, serverProtocol },
+        cloudAgent: this.cloudAgentInteraction(request.dispatch, { protocol, serverProtocol })
+      };
+    }
+
+    const session = this.ensureSession(
+      request.task.id,
+      this.requiredRuntimeArn(),
+      this.config.qualifier,
+      protocol,
+      undefined
+    );
+    const providerRefs = this.sessionProviderRefs(session);
+    return {
+      providerRefs,
+      cloudAgent: this.cloudAgentInteraction(request.dispatch, session)
+    };
+  }
+
   async resolveTarget(request: DispatchRequest): Promise<ResolvedTarget> {
     const runtimeArn = request.target.mode === "session" ? this.requiredRuntimeArn() : undefined;
+    const protocol = this.runtimeProtocol(request);
+    const serverProtocol = toAgentCoreServerProtocol(protocol);
     return {
       account: this.config.account,
       target: {
@@ -89,11 +132,14 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
         capability: request.capability,
         backend: this.name,
         mode: request.target.mode,
+        protocol,
         details: request.target.details,
         providerRefs: {
           region: this.config.region,
           runtimeArn,
-          qualifier: this.config.qualifier ?? "DEFAULT"
+          qualifier: this.config.qualifier ?? "DEFAULT",
+          protocol,
+          serverProtocol
         }
       }
     };
@@ -105,7 +151,13 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     }
 
     const runtimeArn = this.requiredRuntimeArn();
-    const runtimeSessionId = createAgentCoreSessionId(request.task.id);
+    const sessionState = this.ensureSession(
+      request.task.id,
+      runtimeArn,
+      this.config.qualifier,
+      this.runtimeProtocol(request.dispatch),
+      request.target
+    );
     const timestamp = nowIso();
     const session: SessionRecord = {
       id: createId("session"),
@@ -115,17 +167,16 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       capability: request.dispatch.capability,
       backend: this.name,
       status: "ready",
-      providerRefs: {
-        runtimeSessionId,
-        runtimeArn,
-        qualifier: this.config.qualifier ?? "DEFAULT"
-      },
+      providerRefs: this.sessionProviderRefs(sessionState),
       createdAt: timestamp,
       updatedAt: timestamp
     };
-    this.sessions.set(request.task.id, { runtimeSessionId, runtimeArn, qualifier: this.config.qualifier, target: request.target });
     this.push(request.task.id, "session.created", "Created AgentCore runtime session.", session.providerRefs);
-    return { session, providerRefs: session.providerRefs };
+    return {
+      session,
+      providerRefs: session.providerRefs,
+      cloudAgent: this.cloudAgentInteraction(request.dispatch, sessionState)
+    };
   }
 
   async startTask(request: StartTaskRequest): Promise<StartTaskResult> {
@@ -169,6 +220,10 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     if (target.mode !== "runtime" || this.config.deleteRuntimeOnCompletion === false) {
       return { status: "skipped" };
     }
+    const protocol = normalizeRuntimeProtocol(String(target.providerRefs?.protocol ?? target.protocol ?? target.details?.protocol ?? "http"));
+    if (protocol === "a2a" && target.details?.cleanupAfterTask !== true) {
+      return { status: "skipped", providerRefs: { cleanupReason: "a2a_session_available_for_followup" } };
+    }
     const agentRuntimeId = String(target.providerRefs?.agentRuntimeId ?? "");
     const endpointName = String(target.providerRefs?.endpointName ?? "");
     try {
@@ -193,12 +248,14 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     }
 
     const runtimeName = createAgentCoreResourceName(this.config.runtimeNamePrefix ?? "agentdispatch", request.task.id);
+    const protocol = this.runtimeProtocol(request.dispatch);
+    const serverProtocol = toAgentCoreServerProtocol(protocol);
     const runtimeResponse: any = await this.clients.control.send(new CreateAgentRuntimeCommand({
       agentRuntimeName: runtimeName,
       agentRuntimeArtifact: { containerConfiguration: { containerUri: ecrImageUri } },
       roleArn: executionRoleArn,
       networkConfiguration: { networkMode: "PUBLIC" },
-      protocolConfiguration: { serverProtocol: "HTTP" },
+      protocolConfiguration: { serverProtocol },
       clientToken: createAgentCoreClientToken("runtime", request.task.id)
     } as any));
 
@@ -215,7 +272,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     } as any));
     await this.waitForEndpoint(agentRuntimeId, endpointName);
 
-    const runtimeSessionId = createAgentCoreSessionId(request.task.id);
+    const sessionState = this.ensureSession(request.task.id, runtimeArn, endpointName, protocol, request.target);
     const timestamp = nowIso();
     const runtime: RuntimeRecord = {
       id: createId("runtime"),
@@ -225,7 +282,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       capability: request.dispatch.capability,
       backend: this.name,
       status: "ready",
-      providerRefs: { runtimeArn, agentRuntimeId, agentRuntimeVersion, endpointName, endpointArn: endpointResponse.agentRuntimeEndpointArn },
+      providerRefs: { runtimeArn, agentRuntimeId, agentRuntimeVersion, endpointName, endpointArn: endpointResponse.agentRuntimeEndpointArn, protocol, serverProtocol },
       cleanupStatus: "pending",
       createdAt: timestamp,
       updatedAt: timestamp
@@ -238,19 +295,23 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       capability: request.dispatch.capability,
       backend: this.name,
       status: "ready",
-      providerRefs: { runtimeSessionId, runtimeArn, agentRuntimeId, endpointName, qualifier: endpointName },
+      providerRefs: { ...this.sessionProviderRefs(sessionState), agentRuntimeId, endpointName },
       createdAt: timestamp,
       updatedAt: timestamp
     };
     request.target.providerRefs = { ...request.target.providerRefs, ...runtime.providerRefs };
-    this.sessions.set(request.task.id, { runtimeSessionId, runtimeArn, qualifier: endpointName, target: request.target });
     this.push(request.task.id, "runtime.provisioned", "Provisioned AgentCore runtime.", runtime.providerRefs);
     this.push(request.task.id, "session.created", "Created AgentCore runtime session.", session.providerRefs);
-    return { runtime, session, providerRefs: { ...runtime.providerRefs, ...session.providerRefs } };
+    return {
+      runtime,
+      session,
+      providerRefs: { ...runtime.providerRefs, ...session.providerRefs },
+      cloudAgent: this.cloudAgentInteraction(request.dispatch, sessionState)
+    };
   }
 
-  private async startAgentTask(request: StartTaskRequest, session: { runtimeSessionId: string; runtimeArn: string; qualifier?: string }): Promise<StartTaskResult> {
-    const payload = JSON.stringify(createAgentRuntimePayload(request.dispatch));
+  private async startAgentTask(request: StartTaskRequest, session: AwsAgentCoreSession): Promise<StartTaskResult> {
+    const payload = JSON.stringify(createAgentRuntimePayload(request.dispatch, request.task.id, session.protocol));
     const response: any = await this.clients.data.send(new InvokeAgentRuntimeCommand({
       agentRuntimeArn: session.runtimeArn,
       runtimeSessionId: session.runtimeSessionId,
@@ -274,13 +335,14 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       throw new Error(typeof parsed.error === "string" ? parsed.error : "AgentCore worker returned ok:false.");
     }
     return {
-      providerRefs: { runtimeSessionId: session.runtimeSessionId },
+      providerRefs: this.sessionProviderRefs(session),
+      cloudAgent: this.cloudAgentInteraction(request.dispatch, session),
       result: parsed ?? { response: agentResponse.data.length > 0 ? agentResponse.data.join("\n") : agentResponse.text ?? "" },
       artifacts: normalizeArtifactManifest(request.task.id, parsed)
     };
   }
 
-  private async startCommandTask(request: StartTaskRequest, session: { runtimeSessionId: string; runtimeArn: string; qualifier?: string }): Promise<StartTaskResult> {
+  private async startCommandTask(request: StartTaskRequest, session: AwsAgentCoreSession): Promise<StartTaskResult> {
     const command = String(request.dispatch.input.command ?? "");
     if (!command) throw new Error("command.run requires input.command.");
     const response: any = await this.clients.data.send(new InvokeAgentRuntimeCommandCommand({
@@ -310,7 +372,11 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     if (exitCode !== 0) {
       throw new Error(`Command exited with ${exitCode}.`);
     }
-    return { providerRefs: { runtimeSessionId: session.runtimeSessionId }, result: { exitCode } };
+    return {
+      providerRefs: this.sessionProviderRefs(session),
+      cloudAgent: this.cloudAgentInteraction(request.dispatch, session),
+      result: { exitCode }
+    };
   }
 
   private requiredRuntimeArn(): string {
@@ -320,15 +386,124 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     return this.config.runtimeArn;
   }
 
-  private fallbackSession(taskId: string): { runtimeSessionId: string; runtimeArn: string; qualifier?: string; target?: RuntimeTarget } | undefined {
+  private ensureSession(
+    taskId: string,
+    runtimeArn: string,
+    qualifier: string | undefined,
+    protocol: RuntimeProtocol,
+    target: RuntimeTarget | undefined
+  ): AwsAgentCoreSession {
+    const existing = this.sessions.get(taskId);
+    if (existing) {
+      const next = { ...existing, target: target ?? existing.target };
+      this.sessions.set(taskId, next);
+      return next;
+    }
+    const session: AwsAgentCoreSession = {
+      runtimeSessionId: createAgentCoreSessionId(taskId),
+      runtimeArn,
+      qualifier,
+      protocol,
+      serverProtocol: toAgentCoreServerProtocol(protocol),
+      target
+    };
+    this.sessions.set(taskId, session);
+    return session;
+  }
+
+  private fallbackSession(taskId: string): AwsAgentCoreSession | undefined {
     if (!this.config.runtimeArn) return undefined;
+    const protocol = normalizeRuntimeProtocol(this.config.protocol ?? "http");
     return {
       runtimeSessionId: createAgentCoreSessionId(taskId),
       runtimeArn: this.config.runtimeArn,
-      qualifier: this.config.qualifier
+      qualifier: this.config.qualifier,
+      protocol,
+      serverProtocol: toAgentCoreServerProtocol(protocol)
     };
   }
 
+  private sessionProviderRefs(session: Pick<AwsAgentCoreSession, "runtimeSessionId" | "runtimeArn" | "qualifier" | "protocol" | "serverProtocol">): Record<string, unknown> {
+    return {
+      runtimeSessionId: session.runtimeSessionId,
+      runtimeArn: session.runtimeArn,
+      qualifier: session.qualifier ?? "DEFAULT",
+      protocol: session.protocol,
+      serverProtocol: session.serverProtocol
+    };
+  }
+
+  private runtimeProtocol(request: DispatchRequest): RuntimeProtocol {
+    const details = request.target.details ?? {};
+    return normalizeRuntimeProtocol(
+      request.target.protocol ??
+      stringDetail(details, "protocol") ??
+      stringInput(request.input, "protocol") ??
+      this.config.protocol ??
+      "http"
+    );
+  }
+
+  private cloudAgentInteraction(
+    request: DispatchRequest,
+    session: Partial<AwsAgentCoreSession> & { protocol: RuntimeProtocol; serverProtocol: AgentCoreServerProtocol }
+  ): CloudAgentInteraction {
+    const runtimeUrl = session.runtimeArn ? createAgentCoreInvocationUrl(this.config.region, session.runtimeArn) : undefined;
+    const sessionHeaderName = session.protocol === "mcp"
+      ? "Mcp-Session-Id"
+      : "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id";
+    const providerRefs = {
+      region: this.config.region,
+      ...(session.runtimeSessionId ? { runtimeSessionId: session.runtimeSessionId } : {}),
+      ...(session.runtimeArn ? { runtimeArn: session.runtimeArn } : {}),
+      ...(session.qualifier ? { qualifier: session.qualifier } : { qualifier: this.config.qualifier ?? "DEFAULT" }),
+      protocol: session.protocol,
+      serverProtocol: session.serverProtocol,
+      ...(runtimeUrl ? { runtimeUrl } : {})
+    };
+    const interaction: CloudAgentInteraction = {
+      protocol: session.protocol,
+      provider: "aws",
+      backend: this.name,
+      accountProfile: request.accountProfile,
+      sessionId: session.runtimeSessionId,
+      providerRefs,
+      model: request.input.model,
+      tools: recordInput(request.input, "runtime_tools")
+    };
+    if (session.runtimeArn && session.runtimeSessionId) {
+      interaction.invocation = {
+        type: "aws.agentcore.invoke_agent_runtime",
+        provider: "aws",
+        region: this.config.region,
+        accountProfile: request.accountProfile,
+        credentialSource: this.config.account.credentialSource,
+        runtimeUrl,
+        agentRuntimeArn: session.runtimeArn,
+        qualifier: session.qualifier ?? this.config.qualifier ?? "DEFAULT",
+        runtimeSessionId: session.runtimeSessionId,
+        sessionHeaderName,
+        sessionHeaderValue: session.runtimeSessionId,
+        contentType: "application/json",
+        accept: "application/json",
+        payloadFormat: session.protocol === "a2a" ? "a2a.jsonrpc.message-send" : "agentdispatch.runtime-envelope"
+      };
+    }
+    if (session.protocol === "a2a") {
+      interaction.a2a = {
+        transport: "json-rpc-2.0-http",
+        messageMethod: "message/send",
+        agentCardPath: "/.well-known/agent-card.json",
+        agentCardOperation: "GetAgentCard",
+        payloadFormat: "a2a.jsonrpc.message-send",
+        endpointUrl: runtimeUrl,
+        agentCardUrl: runtimeUrl ? new URL(".well-known/agent-card.json", runtimeUrl).toString() : undefined,
+        sessionHeaderName,
+        sessionHeaderValue: session.runtimeSessionId
+      };
+    }
+    return interaction;
+  }
   private async waitForEndpoint(agentRuntimeId: string, endpointName: string): Promise<void> {
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const endpoint: any = await this.clients.control.send(new GetAgentRuntimeEndpointCommand({ agentRuntimeId, endpointName }));
@@ -364,9 +539,45 @@ function createAgentCoreSessionId(taskId: string): string {
   return `ad-${createHash("sha256").update(taskId).digest("hex").slice(0, 32)}`;
 }
 
+function createAgentCoreInvocationUrl(region: string, runtimeArn: string): string {
+  const domainSuffix = runtimeArn.split(":")[1] === "aws-cn" ? "amazonaws.com.cn" : "amazonaws.com";
+  return `https://bedrock-agentcore.${region}.${domainSuffix}/runtimes/${encodeURIComponent(runtimeArn)}/invocations/`;
+}
+
 function stringDetail(details: Record<string, unknown>, key: string): string | undefined {
   const value = details[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function stringInput(input: Record<string, unknown>, key: string): string | undefined {
+  const value = input[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function recordInput(input: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = input[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function normalizeRuntimeProtocol(value: string): RuntimeProtocol {
+  const normalized = value.toLowerCase();
+  if (normalized === "agui") return "ag-ui";
+  return normalized as RuntimeProtocol;
+}
+
+function toAgentCoreServerProtocol(protocol: RuntimeProtocol): AgentCoreServerProtocol {
+  switch (protocol) {
+    case "a2a":
+      return "A2A";
+    case "mcp":
+      return "MCP";
+    case "ag-ui":
+    case "agui":
+      return "AGUI";
+    case "http":
+    default:
+      return "HTTP";
+  }
 }
 
 function requiredString(value: unknown, message: string): string {
@@ -460,12 +671,32 @@ function parseJsonObject(text: string | undefined): Record<string, unknown> | un
   }
 }
 
-function createAgentRuntimePayload(request: DispatchRequest): Record<string, unknown> {
+function createAgentRuntimePayload(request: DispatchRequest, taskId: string, protocol: RuntimeProtocol): Record<string, unknown> {
   const prompt = typeof request.input.prompt === "string"
     ? request.input.prompt
     : typeof request.input.instruction === "string"
       ? request.input.instruction
       : undefined;
+  if (protocol === "a2a") {
+    return {
+      jsonrpc: "2.0",
+      id: taskId,
+      method: "message/send",
+      params: {
+        message: {
+          role: "user",
+          parts: [{ kind: "text", text: prompt ?? "" }],
+          messageId: taskId
+        },
+        metadata: {
+          taskType: request.taskType,
+          input: request.input,
+          context: request.input.context ?? {},
+          ...(request.metadata ? { dispatchMetadata: request.metadata } : {})
+        }
+      }
+    };
+  }
   return {
     taskType: request.taskType,
     input: request.input,
