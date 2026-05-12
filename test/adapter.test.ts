@@ -232,6 +232,31 @@ describe("AwsAgentCoreAdapter", () => {
     expect(control.commands.find((command) => command.constructor.name === "CreateAgentRuntimeCommand").input.protocolConfiguration).toEqual({
       serverProtocol: "A2A"
     });
+    expect(control.commands.find((command) => command.constructor.name === "CreateAgentRuntimeCommand").input.environmentVariables).toMatchObject({
+      AGENTDISPATCH_WORKER_PROTOCOL: "a2a"
+    });
+  });
+
+  it("passes string runtime environment variables into AgentCore runtime mode", async () => {
+    const control = new FakeControlClient();
+    const adapter = createAdapter(new FakeDataClient(), control);
+    const request = createRequest("agent.run", "runtime", {}, {
+      ecrImageUri: "123.dkr.ecr.us-west-2.amazonaws.com/worker:latest",
+      executionRoleArn: "arn:aws:iam::123:role/exec",
+      environmentVariables: {
+        AGENTDISPATCH_WORKER_PROTOCOL: "http",
+        AGENTDISPATCH_AGENT_NAME: "Custom Agent"
+      }
+    }, "a2a");
+    const target = (await adapter.resolveTarget(request)).target;
+    const task = createTask(request);
+
+    await adapter.provision({ dispatch: request, task, target });
+
+    expect(control.commands.find((command) => command.constructor.name === "CreateAgentRuntimeCommand").input.environmentVariables).toEqual({
+      AGENTDISPATCH_WORKER_PROTOCOL: "http",
+      AGENTDISPATCH_AGENT_NAME: "Custom Agent"
+    });
   });
 
   it("keeps A2A runtime-mode resources alive for follow-up by default", async () => {

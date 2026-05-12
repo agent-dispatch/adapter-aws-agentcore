@@ -3,6 +3,39 @@ import { nowIso, type DispatchRequest, type RuntimeTarget, type TaskRecord } fro
 import { AwsAgentCoreAdapter } from "../src/index.js";
 
 describe("live AWS AgentCore integration", () => {
+  it.skipIf(process.env.AGENTDISPATCH_LIVE_AGENTCORE !== "1" || process.env.AGENTDISPATCH_LIVE_AGENTCORE_AGENT_RUN !== "1")("runs agent tasks in session mode and returns cloud-agent handoff metadata", async () => {
+    expect(process.env.AGENTDISPATCH_AWS_REGION).toBeTruthy();
+    expect(process.env.AGENTDISPATCH_AGENTCORE_RUNTIME_ARN).toBeTruthy();
+
+    const adapter = createLiveAdapter();
+    const request = createRequest("agent.run", "session", {
+      instruction: "Return a short AgentDispatch live test response.",
+      context: { source: "agentdispatch-live-test" }
+    });
+    const target = (await adapter.resolveTarget(request)).target;
+    const task = createTask(request);
+    const prepared = await adapter.prepareTask?.({ dispatch: request, task });
+    const provisioned = await adapter.provision({ dispatch: request, task, target });
+    const result = await adapter.startTask({ dispatch: request, task, target, session: provisioned.session });
+    const events = [];
+    for await (const event of adapter.streamEvents(task.id)) events.push(event);
+
+    expect(prepared?.cloudAgent).toMatchObject({
+      provider: "aws",
+      backend: "aws-agentcore",
+      accountProfile: "live-aws",
+      sessionId: expect.stringMatching(/^ad-[a-f0-9]{32}$/),
+      invocation: {
+        type: "aws.agentcore.invoke_agent_runtime",
+        agentRuntimeArn: process.env.AGENTDISPATCH_AGENTCORE_RUNTIME_ARN,
+        sessionHeaderName: "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"
+      }
+    });
+    expect(provisioned.session?.providerRefs.runtimeSessionId).toBe(prepared?.cloudAgent?.sessionId);
+    expect(result.providerRefs).toMatchObject({ runtimeSessionId: prepared?.cloudAgent?.sessionId });
+    expect(events.length).toBeGreaterThan(0);
+  });
+
   it.skipIf(process.env.AGENTDISPATCH_LIVE_AGENTCORE !== "1")("runs command tasks in session mode and exposes refs/events", async () => {
     expect(process.env.AGENTDISPATCH_AWS_REGION).toBeTruthy();
     expect(process.env.AGENTDISPATCH_AGENTCORE_RUNTIME_ARN).toBeTruthy();
@@ -55,6 +88,7 @@ function createLiveAdapter() {
     region: process.env.AGENTDISPATCH_AWS_REGION ?? "us-west-2",
     runtimeArn: process.env.AGENTDISPATCH_AGENTCORE_RUNTIME_ARN,
     qualifier: process.env.AGENTDISPATCH_AGENTCORE_QUALIFIER ?? "DEFAULT",
+    protocol: normalizeProtocol(process.env.AGENTDISPATCH_AGENTCORE_PROTOCOL),
     runtimeNamePrefix: "agentdispatch-live",
     deleteRuntimeOnCompletion: true
   });
@@ -66,9 +100,14 @@ function createRequest(taskType: DispatchRequest["taskType"], mode: RuntimeTarge
     accountProfile: "live-aws",
     capability: "agent-runtime",
     taskType,
-    target: { mode, details },
+    target: { mode, protocol: normalizeProtocol(process.env.AGENTDISPATCH_AGENTCORE_PROTOCOL), details },
     input
   };
+}
+
+function normalizeProtocol(value: string | undefined): DispatchRequest["target"]["protocol"] | undefined {
+  if (!value) return undefined;
+  return value.toLowerCase() as DispatchRequest["target"]["protocol"];
 }
 
 function createTask(request: DispatchRequest): TaskRecord {

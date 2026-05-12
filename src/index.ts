@@ -250,12 +250,14 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     const runtimeName = createAgentCoreResourceName(this.config.runtimeNamePrefix ?? "agentdispatch", request.task.id);
     const protocol = this.runtimeProtocol(request.dispatch);
     const serverProtocol = toAgentCoreServerProtocol(protocol);
+    const environmentVariables = runtimeEnvironmentVariables(details, protocol);
     const runtimeResponse: any = await this.clients.control.send(new CreateAgentRuntimeCommand({
       agentRuntimeName: runtimeName,
       agentRuntimeArtifact: { containerConfiguration: { containerUri: ecrImageUri } },
       roleArn: executionRoleArn,
       networkConfiguration: { networkMode: "PUBLIC" },
       protocolConfiguration: { serverProtocol },
+      ...(Object.keys(environmentVariables).length > 0 ? { environmentVariables } : {}),
       clientToken: createAgentCoreClientToken("runtime", request.task.id)
     } as any));
 
@@ -554,9 +556,28 @@ function stringInput(input: Record<string, unknown>, key: string): string | unde
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function recordDetail(details: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = details[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
 function recordInput(input: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
   const value = input[key];
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function runtimeEnvironmentVariables(details: Record<string, unknown>, protocol: RuntimeProtocol): Record<string, string> {
+  const configured = recordDetail(details, "environmentVariables") ?? recordDetail(details, "environment_variables") ?? {};
+  const environmentVariables: Record<string, string> = {
+    AGENTDISPATCH_WORKER_PROTOCOL: protocol
+  };
+  for (const [key, value] of Object.entries(configured)) {
+    if (typeof value !== "string") {
+      throw new Error(`target.details.environmentVariables.${key} must be a string.`);
+    }
+    environmentVariables[key] = value;
+  }
+  return environmentVariables;
 }
 
 function normalizeRuntimeProtocol(value: string): RuntimeProtocol {
