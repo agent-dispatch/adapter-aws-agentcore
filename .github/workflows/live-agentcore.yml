@@ -62,5 +62,11 @@ jobs:
             test -n "$AGENTDISPATCH_AGENTCORE_EXECUTION_ROLE_ARN"
           fi
       - run: npm ci
+      - name: Install current core checkout
+        run: |
+          npm --prefix ../agentdispatch-core install
+          npm --prefix ../agentdispatch-core run build
+          (cd ../agentdispatch-core && npm pack --pack-destination "$GITHUB_WORKSPACE")
+          npm install --no-save "$GITHUB_WORKSPACE"/agent-dispatch-core-*.tgz
       - run: npm run typecheck
       - run: npm test -- --run test/live.test.ts

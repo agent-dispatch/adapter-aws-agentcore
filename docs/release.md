@@ -5,9 +5,9 @@
 ## Prerequisites
 
 - Publish `@agent-dispatch/core` for the target compatibility line.
-- Add an npm automation token as `NPM_TOKEN` in repository secrets.
-- Replace bootstrap `file:../agentdispatch-core` development links with the published core version before the first registry release.
+- Configure npm Trusted Publisher for `agent-dispatch/adapter-aws-agentcore` using workflow `.github/workflows/publish.yml`.
+- Confirm the target package version has not already been published.
 
 ## Publish
 
-Use the `Publish` GitHub Actions workflow with the target version. The workflow validates typecheck, tests, and build before publishing with npm provenance.
+Use the `Publish` GitHub Actions workflow with the target version. The workflow updates `@agent-dispatch/core` to the latest compatible published version, validates typecheck, tests, and build, then publishes through Trusted Publisher.
