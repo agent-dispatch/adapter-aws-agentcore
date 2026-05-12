@@ -10,10 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: agent-dispatch/core
+          path: .agentdispatch-deps/core
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Pack current core
+        run: |
+          npm --prefix .agentdispatch-deps/core install
+          npm --prefix .agentdispatch-deps/core run build
+          npm --prefix .agentdispatch-deps/core pack --pack-destination "$PWD/.agentdispatch-deps"
       - run: npm install
+      - run: npm install --no-save .agentdispatch-deps/agent-dispatch-core-*.tgz
       - run: npm run typecheck
       - run: npm test --if-present
       - run: npm run build
