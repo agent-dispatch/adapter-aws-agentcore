@@ -21,7 +21,7 @@ jobs:
         run: |
           npm --prefix .agentdispatch-deps/core install
           npm --prefix .agentdispatch-deps/core run build
-          npm --prefix .agentdispatch-deps/core pack --pack-destination "$PWD/.agentdispatch-deps"
+          (cd .agentdispatch-deps/core && npm pack --pack-destination "$GITHUB_WORKSPACE/.agentdispatch-deps")
       - run: npm install
       - run: npm install --no-save .agentdispatch-deps/agent-dispatch-core-*.tgz
       - run: npm run typecheck
