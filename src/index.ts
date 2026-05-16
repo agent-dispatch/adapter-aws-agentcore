@@ -491,6 +491,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       accountProfile: request.accountProfile,
       sessionId: session.runtimeSessionId,
       providerRefs,
+      framework: stringInput(request.input, "framework"),
       model: request.input.model,
       tools: recordInput(request.input, "runtime_tools")
     };
@@ -582,7 +583,7 @@ export async function sendAwsAgentCoreA2AMessage(
     qualifier: stringRecordValue(invocation, "qualifier"),
     contentType: stringRecordValue(invocation, "contentType") ?? "application/json",
     accept: stringRecordValue(invocation, "accept") ?? "application/json",
-    payload: Buffer.from(JSON.stringify(createA2AMessageSendPayload(message)))
+    payload: Buffer.from(JSON.stringify(createA2AMessageSendPayload(withCloudAgentA2AMetadata(cloudAgent, message))))
   }));
   const text = await readResponseToString(response.response);
   const parsed = parseJsonObject(text);
@@ -766,6 +767,15 @@ function createA2AMessageSendPayload(message: AwsAgentCoreA2AMessage): Record<st
       ...(message.metadata ? { metadata: message.metadata } : {})
     }
   };
+}
+
+function withCloudAgentA2AMetadata(cloudAgent: CloudAgentInteraction, message: AwsAgentCoreA2AMessage): AwsAgentCoreA2AMessage {
+  const defaults: Record<string, unknown> = {};
+  if (cloudAgent.framework) defaults.framework = cloudAgent.framework;
+  if (cloudAgent.model !== undefined) defaults.model = cloudAgent.model;
+  if (cloudAgent.tools) defaults.runtime_tools = cloudAgent.tools;
+  const metadata = { ...defaults, ...message.metadata };
+  return Object.keys(metadata).length > 0 ? { ...message, metadata } : message;
 }
 
 function createAgentRuntimePayload(request: DispatchRequest, taskId: string, protocol: RuntimeProtocol): Record<string, unknown> {

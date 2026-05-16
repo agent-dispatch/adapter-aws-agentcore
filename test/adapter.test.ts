@@ -90,7 +90,12 @@ describe("AwsAgentCoreAdapter", () => {
 
   it("prepares A2A AgentCore connection details for lead agents", async () => {
     const adapter = createAdapter();
-    const request = createRequest("agent.run", "session", { instruction: "delegate", model: "claude-sonnet" }, undefined, "a2a");
+    const request = createRequest("agent.run", "session", {
+      instruction: "delegate",
+      framework: "openclaw",
+      model: "claude-sonnet",
+      runtime_tools: { enabled: ["repo-search"] }
+    }, undefined, "a2a");
     const task = createTask(request);
     const prepared = await adapter.prepareTask({ dispatch: request, task });
     const provisioned = await adapter.provision({
@@ -112,6 +117,9 @@ describe("AwsAgentCoreAdapter", () => {
         sessionHeaderName: "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id",
         payloadFormat: "a2a.jsonrpc.message-send"
       },
+      framework: "openclaw",
+      model: "claude-sonnet",
+      tools: { enabled: ["repo-search"] },
       a2a: {
         transport: "json-rpc-2.0-http",
         messageMethod: "message/send",
@@ -177,7 +185,12 @@ describe("AwsAgentCoreAdapter", () => {
       }
     });
     const adapter = createAdapter(data);
-    const request = createRequest("agent.run", "session", { instruction: "delegate" }, undefined, "a2a");
+    const request = createRequest("agent.run", "session", {
+      instruction: "delegate",
+      framework: "openclaw",
+      model: "claude-sonnet",
+      runtime_tools: { enabled: ["repo-search"] }
+    }, undefined, "a2a");
     const task = createTask(request);
     const prepared = await adapter.prepareTask({ dispatch: request, task });
 
@@ -203,7 +216,12 @@ describe("AwsAgentCoreAdapter", () => {
       id: "req-1",
       method: "message/send",
       params: {
-        metadata: { priority: "background" },
+        metadata: {
+          framework: "openclaw",
+          model: "claude-sonnet",
+          runtime_tools: { enabled: ["repo-search"] },
+          priority: "background"
+        },
         message: {
           role: "user",
           parts: [{ kind: "text", text: "continue" }],
