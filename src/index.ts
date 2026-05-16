@@ -128,7 +128,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
 
     const session = this.ensureSession(
       request.task.id,
-      this.requiredRuntimeArn(),
+      this.sessionRuntimeArn(request.dispatch),
       this.config.qualifier,
       protocol,
       undefined
@@ -141,7 +141,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
   }
 
   async resolveTarget(request: DispatchRequest): Promise<ResolvedTarget> {
-    const runtimeArn = request.target.mode === "session" ? this.requiredRuntimeArn() : undefined;
+    const runtimeArn = request.target.mode === "session" ? this.sessionRuntimeArn(request) : undefined;
     const protocol = this.runtimeProtocol(request);
     const serverProtocol = toAgentCoreServerProtocol(protocol);
     return {
@@ -170,7 +170,7 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
       return this.provisionRuntime(request);
     }
 
-    const runtimeArn = this.requiredRuntimeArn();
+    const runtimeArn = this.sessionRuntimeArn(request.dispatch);
     const sessionState = this.ensureSession(
       request.task.id,
       runtimeArn,
@@ -401,11 +401,12 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
     };
   }
 
-  private requiredRuntimeArn(): string {
-    if (!this.config.runtimeArn) {
-      throw new Error("AWS AgentCore session mode requires runtimeArn.");
+  private sessionRuntimeArn(request: DispatchRequest): string {
+    const runtimeArn = stringDetail(request.target.details ?? {}, "runtimeArn") ?? this.config.runtimeArn;
+    if (!runtimeArn) {
+      throw new Error("AWS AgentCore session mode requires runtimeArn in backend config, AGENTDISPATCH_AGENTCORE_RUNTIME_ARN, or target.details.runtimeArn.");
     }
-    return this.config.runtimeArn;
+    return runtimeArn;
   }
 
   private ensureSession(

@@ -123,6 +123,24 @@ describe("AwsAgentCoreAdapter", () => {
     expect(provisioned.session?.providerRefs.runtimeSessionId).toBe(prepared.cloudAgent?.sessionId);
   });
 
+  it("uses target.details.runtimeArn for session-mode clarification retries", async () => {
+    const runtimeArn = "arn:aws:bedrock-agentcore:us-east-1:123456789012:agent/11111111-1111-1111-1111-111111111111:1";
+    const adapter = new AwsAgentCoreAdapter({
+      account: { name: "dev-aws", provider: "aws", credentialSource: "aws-sdk-default" },
+      region: "us-east-1"
+    }, { data: new FakeDataClient() as any, control: new FakeControlClient() as any });
+    const request = createRequest("agent.run", "session", { instruction: "delegate" }, { runtimeArn }, "a2a");
+    const task = createTask(request);
+
+    const target = (await adapter.resolveTarget(request)).target;
+    const prepared = await adapter.prepareTask({ dispatch: request, task });
+    const provisioned = await adapter.provision({ dispatch: request, task, target });
+
+    expect(target.providerRefs?.runtimeArn).toBe(runtimeArn);
+    expect(prepared.cloudAgent?.invocation?.agentRuntimeArn).toBe(runtimeArn);
+    expect(provisioned.session?.providerRefs.runtimeArn).toBe(runtimeArn);
+  });
+
   it("sends A2A message/send payloads when target protocol is a2a", async () => {
     const data = new FakeDataClient();
     const adapter = createAdapter(data);
