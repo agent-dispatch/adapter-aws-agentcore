@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { nowIso, type DispatchRequest, type RuntimeTarget, type TaskRecord } from "@agent-dispatch/core";
-import { AwsAgentCoreAdapter } from "../src/index.js";
+import { AwsAgentCoreAdapter, sendAwsAgentCoreA2AMessage } from "../src/index.js";
 
 class FakeDataClient {
   commands: any[] = [];
@@ -145,6 +145,55 @@ describe("AwsAgentCoreAdapter", () => {
         }
       }
     });
+  });
+
+  it("sends follow-up A2A messages from returned cloud-agent metadata", async () => {
+    const data = new FakeDataClient({
+      jsonrpc: "2.0",
+      id: "req-1",
+      result: {
+        kind: "message",
+        role: "agent",
+        parts: [{ kind: "text", text: "follow-up done" }],
+        metadata: { ok: true }
+      }
+    });
+    const adapter = createAdapter(data);
+    const request = createRequest("agent.run", "session", { instruction: "delegate" }, undefined, "a2a");
+    const task = createTask(request);
+    const prepared = await adapter.prepareTask({ dispatch: request, task });
+
+    const result = await sendAwsAgentCoreA2AMessage(prepared.cloudAgent!, {
+      id: "req-1",
+      messageId: "msg-1",
+      text: "continue",
+      metadata: { priority: "background" }
+    }, { client: data as any });
+
+    const command = data.commands.at(-1);
+    const payload = JSON.parse(Buffer.from(command.input.payload).toString("utf8"));
+    expect(command.constructor.name).toBe("InvokeAgentRuntimeCommand");
+    expect(command.input).toMatchObject({
+      agentRuntimeArn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:agent/00000000-0000-0000-0000-000000000000:1",
+      runtimeSessionId: prepared.cloudAgent?.sessionId,
+      qualifier: "DEFAULT",
+      contentType: "application/json",
+      accept: "application/json"
+    });
+    expect(payload).toMatchObject({
+      jsonrpc: "2.0",
+      id: "req-1",
+      method: "message/send",
+      params: {
+        metadata: { priority: "background" },
+        message: {
+          role: "user",
+          parts: [{ kind: "text", text: "continue" }],
+          messageId: "msg-1"
+        }
+      }
+    });
+    expect(result).toMatchObject({ text: "follow-up done", metadata: { ok: true } });
   });
 
   it("runs command tasks and maps command stream chunks to events", async () => {

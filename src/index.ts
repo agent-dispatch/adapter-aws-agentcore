@@ -51,6 +51,26 @@ export interface AwsAgentCoreAdapterConfig {
   deleteRuntimeOnCompletion?: boolean;
 }
 
+export interface AwsAgentCoreA2AMessage {
+  id?: string;
+  role?: "user" | "agent" | (string & {});
+  text?: string;
+  parts?: Array<{ kind: "text" | (string & {}); text?: string; [key: string]: unknown }>;
+  messageId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AwsAgentCoreA2AResult {
+  raw?: Record<string, unknown>;
+  text?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AwsAgentCoreA2AOptions {
+  client?: { send(command: InvokeAgentRuntimeCommand): Promise<any> };
+  region?: string;
+}
+
 interface AwsAgentCoreClients {
   data: BedrockAgentCoreClient;
   control: BedrockAgentCoreControlClient;
@@ -537,6 +557,41 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
   }
 }
 
+export async function sendAwsAgentCoreA2AMessage(
+  cloudAgent: CloudAgentInteraction,
+  message: AwsAgentCoreA2AMessage,
+  options: AwsAgentCoreA2AOptions = {}
+): Promise<AwsAgentCoreA2AResult> {
+  if (cloudAgent.protocol !== "a2a") {
+    throw new Error(`Cloud agent protocol is ${cloudAgent.protocol}, not a2a.`);
+  }
+  const invocation = cloudAgent.invocation;
+  if (!invocation || invocation.type !== "aws.agentcore.invoke_agent_runtime") {
+    throw new Error("Cloud agent does not include AWS AgentCore invocation metadata.");
+  }
+  const region = options.region ?? stringRecordValue(invocation, "region") ?? stringRecordValue(cloudAgent.providerRefs, "region");
+  const client = options.client ?? new BedrockAgentCoreClient({ region });
+  const runtimeSessionId = stringRecordValue(invocation, "runtimeSessionId") ?? cloudAgent.sessionId;
+  if (!runtimeSessionId) {
+    throw new Error("cloudAgent.invocation.runtimeSessionId or cloudAgent.sessionId is required.");
+  }
+  const response = await client.send(new InvokeAgentRuntimeCommand({
+    agentRuntimeArn: requiredRecordString(invocation, "agentRuntimeArn", "cloudAgent.invocation.agentRuntimeArn is required."),
+    runtimeSessionId,
+    qualifier: stringRecordValue(invocation, "qualifier"),
+    contentType: stringRecordValue(invocation, "contentType") ?? "application/json",
+    accept: stringRecordValue(invocation, "accept") ?? "application/json",
+    payload: Buffer.from(JSON.stringify(createA2AMessageSendPayload(message)))
+  }));
+  const text = await readResponseToString(response.response);
+  const parsed = parseJsonObject(text);
+  return {
+    raw: parsed,
+    text: extractA2AResultText(parsed) ?? text,
+    metadata: extractA2AResultMetadata(parsed)
+  };
+}
+
 function createAgentCoreSessionId(taskId: string): string {
   return `ad-${createHash("sha256").update(taskId).digest("hex").slice(0, 32)}`;
 }
@@ -692,6 +747,26 @@ function parseJsonObject(text: string | undefined): Record<string, unknown> | un
   }
 }
 
+function createA2AMessageSendPayload(message: AwsAgentCoreA2AMessage): Record<string, unknown> {
+  const parts = message.parts ?? (message.text !== undefined ? [{ kind: "text", text: message.text }] : undefined);
+  if (!parts?.length) {
+    throw new Error("A2A follow-up requires message.text or message.parts.");
+  }
+  return {
+    jsonrpc: "2.0",
+    id: message.id ?? createClientPayloadId("a2a"),
+    method: "message/send",
+    params: {
+      message: {
+        role: message.role ?? "user",
+        parts,
+        messageId: message.messageId ?? createClientPayloadId("msg")
+      },
+      ...(message.metadata ? { metadata: message.metadata } : {})
+    }
+  };
+}
+
 function createAgentRuntimePayload(request: DispatchRequest, taskId: string, protocol: RuntimeProtocol): Record<string, unknown> {
   const prompt = typeof request.input.prompt === "string"
     ? request.input.prompt
@@ -727,6 +802,24 @@ function createAgentRuntimePayload(request: DispatchRequest, taskId: string, pro
   };
 }
 
+function extractA2AResultText(parsed: Record<string, unknown> | undefined): string | undefined {
+  const result = recordValue(parsed, "result") ?? parsed;
+  const message = recordValue(result, "message") ?? result;
+  const parts = Array.isArray(message?.parts) ? message.parts : [];
+  const text = parts
+    .flatMap((part) => typeof part === "object" && part && typeof (part as Record<string, unknown>).text === "string"
+      ? [(part as Record<string, string>).text]
+      : [])
+    .join("\n");
+  return text || undefined;
+}
+
+function extractA2AResultMetadata(parsed: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  const result = recordValue(parsed, "result") ?? parsed;
+  const message = recordValue(result, "message") ?? result;
+  return recordValue(message, "metadata") ?? recordValue(result, "metadata");
+}
+
 function normalizeWorkerEvents(taskId: string, parsed: Record<string, unknown> | undefined): RuntimeEvent[] {
   const events = Array.isArray(parsed?.events) ? parsed.events : [];
   return events.flatMap((event) => {
@@ -740,6 +833,26 @@ function normalizeWorkerEvents(taskId: string, parsed: Record<string, unknown> |
       : undefined;
     return [{ taskId, type, message, payload, timestamp: nowIso() }];
   });
+}
+
+function recordValue(record: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+  const value = record?.[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringRecordValue(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function requiredRecordString(record: Record<string, unknown>, key: string, message: string): string {
+  const value = stringRecordValue(record, key);
+  if (!value) throw new Error(message);
+  return value;
+}
+
+function createClientPayloadId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function normalizeArtifactManifest(taskId: string, parsed: Record<string, unknown> | undefined): ArtifactRecord[] {

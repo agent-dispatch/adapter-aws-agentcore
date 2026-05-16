@@ -99,6 +99,22 @@ Runtime provisioning mode:
 
 The response includes `cloud_agent` details such as protocol, provider, runtime session ID, runtime ARN, AgentCore invocation URL, A2A Agent Card URL, and the required session header. A lead agent can use that data to continue with A2A where supported by the runtime.
 
+## Continue With A2A
+
+Use `sendAwsAgentCoreA2AMessage` when you want the lead agent or application code to continue the same AgentCore runtime session after `spawn_cloud_agent` returns:
+
+```ts
+import { sendAwsAgentCoreA2AMessage } from "@agent-dispatch/adapter-aws-agentcore";
+
+const followUp = await sendAwsAgentCoreA2AMessage(task.cloudAgent!, {
+  text: "Continue the investigation and focus on IAM findings."
+});
+
+console.log(followUp.text);
+```
+
+The helper uses the AWS SDK default credential chain. It reads `agentRuntimeArn`, `runtimeSessionId`, `qualifier`, content type, and accept headers from `cloudAgent.invocation`, sends a JSON-RPC `message/send` payload through `InvokeAgentRuntime`, and returns normalized text plus metadata.
+
 ## Worker image
 
 For a ready reference runtime, use `@agent-dispatch/worker-agentcore`. It exposes health, Agent Card discovery, and A2A JSON-RPC `message/send` endpoints suitable for AgentCore runtime experiments.
