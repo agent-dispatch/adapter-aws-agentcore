@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { nowIso, type DispatchRequest, type RuntimeTarget, type TaskRecord } from "@agent-dispatch/core";
-import { AwsAgentCoreAdapter, sendAwsAgentCoreA2AMessage } from "../src/index.js";
+import { AwsAgentCoreAdapter, checkAwsAgentCoreLivePreflight, sendAwsAgentCoreA2AMessage } from "../src/index.js";
 
 class FakeDataClient {
   commands: any[] = [];
@@ -49,6 +49,8 @@ class FakeControlClient {
         };
       case "GetAgentRuntimeCommand":
         return { status: "READY" };
+      case "ListAgentRuntimesCommand":
+        return { agentRuntimes: [] };
       case "CreateAgentRuntimeEndpointCommand":
         return {
           agentRuntimeEndpointArn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:agent/00000000-0000-0000-0000-000000000000/endpoint/endpoint",
@@ -415,6 +417,39 @@ describe("AwsAgentCoreAdapter", () => {
       agentRuntimeArn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:agent/00000000-0000-0000-0000-000000000000:1",
       runtimeSessionId: provisioned.session?.providerRefs.runtimeSessionId
     });
+  });
+
+  it("checks live AgentCore runtime reachability for session mode", async () => {
+    const control = new FakeControlClient();
+    const checks = await checkAwsAgentCoreLivePreflight({
+      runtimeName: "research-agent",
+      region: "us-west-2",
+      mode: "session",
+      runtimeArn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:agent/00000000-0000-0000-0000-000000000000:1"
+    }, { client: control });
+
+    expect(checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "aws.research-agent.credentials", status: "pass" }),
+      expect.objectContaining({ name: "aws.research-agent.runtime", status: "pass" })
+    ]));
+    expect(control.commands.find((command) => command.constructor.name === "GetAgentRuntimeCommand").input).toMatchObject({
+      agentRuntimeId: "00000000-0000-0000-0000-000000000000",
+      agentRuntimeVersion: "1"
+    });
+  });
+
+  it("checks AgentCore control plane reachability for runtime mode", async () => {
+    const control = new FakeControlClient();
+    const checks = await checkAwsAgentCoreLivePreflight({
+      runtimeName: "fresh-agent",
+      region: "us-west-2",
+      mode: "runtime"
+    }, { client: control });
+
+    expect(checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "aws.fresh-agent.control-plane", status: "pass" })
+    ]));
+    expect(control.commands.map((command) => command.constructor.name)).toContain("ListAgentRuntimesCommand");
   });
 });
 

@@ -11,7 +11,8 @@ import {
   DeleteAgentRuntimeCommand,
   DeleteAgentRuntimeEndpointCommand,
   GetAgentRuntimeCommand,
-  GetAgentRuntimeEndpointCommand
+  GetAgentRuntimeEndpointCommand,
+  ListAgentRuntimesCommand
 } from "@aws-sdk/client-bedrock-agentcore-control";
 import { createHash } from "node:crypto";
 import {
@@ -69,6 +70,26 @@ export interface AwsAgentCoreA2AResult {
 export interface AwsAgentCoreA2AOptions {
   client?: { send(command: InvokeAgentRuntimeCommand): Promise<any> };
   region?: string;
+}
+
+export interface AwsAgentCoreLivePreflightInput {
+  runtimeName: string;
+  region: string;
+  mode: string;
+  runtimeArn?: string;
+}
+
+export interface AwsAgentCoreLivePreflightCheck {
+  name: string;
+  status: "pass" | "warn" | "fail";
+  message: string;
+}
+
+export interface AwsAgentCoreLivePreflightOptions {
+  client?: {
+    config?: { credentials?: unknown };
+    send(command: any): Promise<any>;
+  };
 }
 
 interface AwsAgentCoreClients {
@@ -559,6 +580,75 @@ export class AwsAgentCoreAdapter implements BackendAdapter {
   }
 }
 
+export async function checkAwsAgentCoreLivePreflight(
+  input: AwsAgentCoreLivePreflightInput,
+  options: AwsAgentCoreLivePreflightOptions = {}
+): Promise<AwsAgentCoreLivePreflightCheck[]> {
+  const checks: AwsAgentCoreLivePreflightCheck[] = [];
+  const client = options.client ?? new BedrockAgentCoreControlClient({ region: input.region });
+  try {
+    await resolveAwsControlCredentials(client);
+    checks.push({
+      name: `aws.${input.runtimeName}.credentials`,
+      status: "pass",
+      message: `AWS credentials resolved for region ${input.region}.`
+    });
+  } catch (error) {
+    return [{
+      name: `aws.${input.runtimeName}.credentials`,
+      status: "fail",
+      message: `AWS credentials could not be resolved: ${formatErrorMessage(error)}`
+    }];
+  }
+
+  if (input.mode === "session") {
+    if (!input.runtimeArn) {
+      checks.push({
+        name: `aws.${input.runtimeName}.runtime`,
+        status: "fail",
+        message: "Session mode requires runtimeArn in the runtime profile, backend details, or AGENTDISPATCH_AGENTCORE_RUNTIME_ARN."
+      });
+      return checks;
+    }
+
+    try {
+      const parsed = parseAgentCoreRuntimeArn(input.runtimeArn);
+      const runtime = await client.send(new GetAgentRuntimeCommand({
+        agentRuntimeId: parsed.id,
+        agentRuntimeVersion: parsed.version
+      }));
+      checks.push({
+        name: `aws.${input.runtimeName}.runtime`,
+        status: runtime.status === "READY" ? "pass" : "warn",
+        message: `AgentCore runtime ${runtime.agentRuntimeName ?? parsed.id} is ${runtime.status ?? "UNKNOWN"} in ${input.region}.`
+      });
+    } catch (error) {
+      checks.push({
+        name: `aws.${input.runtimeName}.runtime`,
+        status: "fail",
+        message: `AgentCore runtime ${input.runtimeArn} was not reachable: ${formatErrorMessage(error)}`
+      });
+    }
+    return checks;
+  }
+
+  try {
+    await client.send(new ListAgentRuntimesCommand({ maxResults: 1 }));
+    checks.push({
+      name: `aws.${input.runtimeName}.control-plane`,
+      status: "pass",
+      message: `AgentCore control plane is reachable in ${input.region}; runtime mode can create runtimes at dispatch time.`
+    });
+  } catch (error) {
+    checks.push({
+      name: `aws.${input.runtimeName}.control-plane`,
+      status: "fail",
+      message: `AgentCore control plane was not reachable in ${input.region}: ${formatErrorMessage(error)}`
+    });
+  }
+  return checks;
+}
+
 export async function sendAwsAgentCoreA2AMessage(
   cloudAgent: CloudAgentInteraction,
   message: AwsAgentCoreA2AMessage,
@@ -665,6 +755,26 @@ function requiredString(value: unknown, message: string): string {
 
 function runtimeArnToId(runtimeArn: string): string {
   return runtimeArn.split("/").at(-1)?.split(":")[0] ?? runtimeArn;
+}
+
+function parseAgentCoreRuntimeArn(runtimeArn: string): { id: string; version?: string } {
+  const resource = runtimeArn.split(":").slice(5).join(":");
+  const suffix = resource.split("/").at(-1) ?? runtimeArn;
+  const [id, version] = suffix.split(":");
+  return { id, version };
+}
+
+async function resolveAwsControlCredentials(client: AwsAgentCoreLivePreflightOptions["client"]): Promise<unknown> {
+  const credentials = client?.config?.credentials;
+  return typeof credentials === "function" ? credentials() : credentials;
+}
+
+function formatErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const code = typeof (error as { name?: unknown }).name === "string" ? `${(error as { name: string }).name}: ` : "";
+    return `${code}${error.message}`;
+  }
+  return String(error);
 }
 
 function createAgentCoreResourceName(prefix: string, taskId: string): string {
