@@ -2,6 +2,16 @@
   "name": "@agent-dispatch/adapter-aws-agentcore",
   "version": "0.1.5",
   "description": "AWS Bedrock AgentCore backend adapter for AgentDispatch.",
+  "keywords": [
+    "agentdispatch",
+    "aws",
+    "bedrock-agentcore",
+    "agentcore",
+    "mcp",
+    "cloud-agents",
+    "subagents",
+    "agent-orchestration"
+  ],
   "type": "module",
   "license": "Apache-2.0",
   "exports": {
