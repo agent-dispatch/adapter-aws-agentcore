@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - run: npm install
+      - run: npm ci
       - run: npm update @agent-dispatch/core
       - run: npm run typecheck
       - run: npm test
