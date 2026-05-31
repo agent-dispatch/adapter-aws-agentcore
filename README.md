@@ -1,6 +1,7 @@
 # @agent-dispatch/adapter-aws-agentcore
 
 [![npm](https://img.shields.io/npm/v/@agent-dispatch/adapter-aws-agentcore.svg)](https://www.npmjs.com/package/@agent-dispatch/adapter-aws-agentcore)
+[![CI](https://github.com/agent-dispatch/adapter-aws-agentcore/actions/workflows/ci.yml/badge.svg)](https://github.com/agent-dispatch/adapter-aws-agentcore/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/@agent-dispatch/adapter-aws-agentcore.svg)](https://www.npmjs.com/package/@agent-dispatch/adapter-aws-agentcore)
 
 - `provider: "aws"`
